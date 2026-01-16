@@ -1561,3 +1561,776 @@ footer {
 | `static/css/styles.css` | Custom styles |
 | `static/js/project-editor.js` | Project editor controller |
 | `static/js/unsaved-changes.js` | Unsaved changes tracker |
+| `templates/settings/material_edit.html` | Material G-code standards editor |
+| `templates/settings/tools.html` | Tools management page |
+
+---
+
+## Template Data Passing
+
+This section explains how data flows from routes to templates and then to JavaScript.
+
+### How Routes Pass Data to Templates
+
+Routes use `render_template()` to pass data. Here's the pattern for each page:
+
+**Index Page (projects list):**
+```python
+# In web/routes/main.py
+@main_bp.route('/')
+def index():
+    projects = ProjectService.get_all()  # Returns list of Project objects
+    return render_template('index.html', projects=projects)
+```
+
+Template receives `projects` as a list of SQLAlchemy model objects:
+```html
+{% for project in projects %}
+    <h5>{{ project.name }}</h5>
+    <p>{{ project.material.display_name }}</p>  {# Access relationship #}
+{% endfor %}
+```
+
+**Project Editor Page:**
+```python
+# In web/routes/projects.py
+@projects_bp.route('/<project_id>')
+def edit(project_id):
+    project = ProjectService.get(project_id)
+    materials = SettingsService.get_all_materials()
+    materials_dict = SettingsService.get_materials_dict()
+    tools = SettingsService.get_all_tools()
+    project_dict = ProjectService.get_as_dict(project_id)
+
+    return render_template(
+        'project/edit.html',
+        project=project,           # SQLAlchemy object for Jinja
+        materials=materials,       # List for select dropdowns
+        tools=tools,               # List for select dropdowns
+        project_json=json.dumps(project_dict),    # JSON string for JS
+        materials_json=json.dumps(materials_dict) # JSON string for JS
+    )
+```
+
+### Passing Data to JavaScript
+
+Use `json.dumps()` in Python and the `| safe` filter in Jinja to embed JSON in the page:
+
+```html
+{% block scripts %}
+<script>
+    // These variables are available to JavaScript
+    const PROJECT_ID = "{{ project.id }}";
+    const PROJECT_DATA = {{ project_json | safe }};
+    const MATERIALS = {{ materials_json | safe }};
+</script>
+<script src="{{ url_for('static', filename='js/project-editor.js') }}"></script>
+{% endblock %}
+```
+
+The `| safe` filter prevents Jinja from escaping the JSON, which would break JavaScript parsing.
+
+### Data Dictionary Structures
+
+**project_json structure:**
+```javascript
+{
+    "id": "uuid-string",
+    "name": "My Project",
+    "project_type": "drill",          // or "cut"
+    "material_id": "aluminum_sheet_0125",
+    "drill_bit_size": 0.125,
+    "end_mill_size": null,
+    "tube_void_skip": false,
+    "operations": {
+        "drill_holes": [...],
+        "circular_cuts": [...],
+        "line_cuts": [...]
+    },
+    "created_at": "2024-01-15T10:30:00",
+    "modified_at": "2024-01-15T14:22:00"
+}
+```
+
+**materials_json structure:**
+```javascript
+{
+    "aluminum_sheet_0125": {
+        "id": "aluminum_sheet_0125",
+        "display_name": "Aluminum Sheet 1/8\"",
+        "base_material": "aluminum",
+        "form": "sheet",
+        "thickness": 0.125,
+        "outer_width": null,
+        "outer_height": null,
+        "wall_thickness": null,
+        "gcode_standards": {
+            "drill": {
+                "0.125": {"spindle_speed": 1000, "feed_rate": 2.0, ...}
+            },
+            "cut": {
+                "0.125": {"spindle_speed": 10000, "feed_rate": 10.0, ...}
+            }
+        }
+    },
+    "aluminum_tube_2x1_0125": {
+        "form": "tube",
+        "outer_width": 2.0,
+        "outer_height": 1.0,
+        "wall_thickness": 0.125,
+        ...
+    }
+}
+```
+
+---
+
+## Form Validation
+
+### Server-Side Validation
+
+Always validate on the server. Here's a pattern using Flask's `request.form`:
+
+```python
+# In web/routes/projects.py
+@projects_bp.route('/create', methods=['POST'])
+def create():
+    # Extract form data
+    name = request.form.get('name', '').strip()
+    project_type = request.form.get('project_type')
+    material_id = request.form.get('material_id')
+
+    # Validate required fields
+    errors = []
+    if not name:
+        errors.append('Project name is required')
+    if not project_type or project_type not in ('drill', 'cut'):
+        errors.append('Valid project type is required')
+    if not material_id:
+        errors.append('Material selection is required')
+
+    # Check name uniqueness (optional)
+    existing = Project.query.filter_by(name=name).first()
+    if existing:
+        errors.append('A project with this name already exists')
+
+    # If errors, flash and redirect back
+    if errors:
+        for error in errors:
+            flash(error, 'danger')
+        return redirect(url_for('projects.new'))
+
+    # Create project
+    project = ProjectService.create({
+        'name': name,
+        'project_type': project_type,
+        'material_id': material_id
+    })
+    flash('Project created successfully', 'success')
+    return redirect(url_for('projects.edit', project_id=project.id))
+```
+
+### Client-Side Validation
+
+Add HTML5 validation attributes and JavaScript validation:
+
+```html
+<form method="POST" action="{{ url_for('projects.create') }}" id="new-project-form">
+    <div class="mb-3">
+        <label for="name" class="form-label">Project Name</label>
+        <input type="text" class="form-control" id="name" name="name"
+               required minlength="1" maxlength="200"
+               pattern="[A-Za-z0-9\s\-_]+"
+               placeholder="e.g., Drivetrain Gusset">
+        <div class="invalid-feedback">
+            Please enter a valid project name (letters, numbers, spaces, hyphens, underscores)
+        </div>
+    </div>
+
+    <div class="mb-3">
+        <label for="project_type" class="form-label">Project Type</label>
+        <select class="form-select" id="project_type" name="project_type" required>
+            <option value="">Select type...</option>
+            <option value="drill">Drill</option>
+            <option value="cut">Cut</option>
+        </select>
+        <div class="invalid-feedback">
+            Please select a project type
+        </div>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Create Project</button>
+</form>
+
+<script>
+// Bootstrap validation
+(function() {
+    'use strict';
+    const form = document.getElementById('new-project-form');
+    form.addEventListener('submit', function(event) {
+        if (!form.checkValidity()) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        form.classList.add('was-validated');
+    }, false);
+})();
+</script>
+```
+
+### API Validation (JSON endpoints)
+
+For AJAX endpoints, return JSON error responses:
+
+```python
+# In web/routes/api.py
+@api_bp.route('/projects/<project_id>/save', methods=['POST'])
+def save_project(project_id):
+    data = request.get_json()
+
+    # Validate
+    errors = []
+    if not data.get('name', '').strip():
+        errors.append('Project name is required')
+
+    # Validate operations structure
+    operations = data.get('operations', {})
+    for drill in operations.get('drill_holes', []):
+        if drill.get('type') == 'single':
+            if 'x' not in drill or 'y' not in drill:
+                errors.append(f"Drill operation {drill.get('id')} missing coordinates")
+
+    if errors:
+        return jsonify({'status': 'error', 'errors': errors}), 400
+
+    # Save
+    project = ProjectService.save(project_id, data)
+    return jsonify({'status': 'saved', 'modified_at': project.modified_at.isoformat()})
+```
+
+JavaScript handling:
+```javascript
+async save() {
+    const response = await fetch(`/api/projects/${this.projectId}/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.data)
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || result.status === 'error') {
+        // Show errors
+        const errors = result.errors || ['Unknown error occurred'];
+        alert('Validation errors:\n' + errors.join('\n'));
+        return false;
+    }
+
+    this.unsavedTracker.markSaved(this.data);
+    return true;
+}
+```
+
+---
+
+## Additional Templates
+
+### Material Edit Page (templates/settings/material_edit.html)
+
+This template allows editing G-code standards for each tool size:
+
+```html
+{% extends "base.html" %}
+{% block title %}Edit Material - {{ material.display_name }}{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Edit Material: {{ material.display_name }}</h1>
+
+<form method="POST" action="{{ url_for('settings.update_material', material_id=material.id) }}">
+    <div class="row">
+        <!-- Basic Info Column -->
+        <div class="col-md-4">
+            <div class="card mb-3">
+                <div class="card-header">Basic Information</div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label">Display Name</label>
+                        <input type="text" class="form-control" name="display_name"
+                               value="{{ material.display_name }}" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Base Material</label>
+                        <select class="form-select" name="base_material">
+                            <option value="aluminum" {{ 'selected' if material.base_material == 'aluminum' }}>Aluminum</option>
+                            <option value="polycarbonate" {{ 'selected' if material.base_material == 'polycarbonate' }}>Polycarbonate</option>
+                            <option value="steel" {{ 'selected' if material.base_material == 'steel' }}>Steel</option>
+                            <option value="hdpe" {{ 'selected' if material.base_material == 'hdpe' }}>HDPE</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Form</label>
+                        <select class="form-select" name="form" id="material-form">
+                            <option value="sheet" {{ 'selected' if material.form == 'sheet' }}>Sheet</option>
+                            <option value="tube" {{ 'selected' if material.form == 'tube' }}>Tube</option>
+                        </select>
+                    </div>
+
+                    <!-- Sheet dimensions -->
+                    <div id="sheet-dims" {% if material.form != 'sheet' %}style="display:none"{% endif %}>
+                        <div class="mb-3">
+                            <label class="form-label">Thickness (inches)</label>
+                            <input type="number" step="0.001" class="form-control" name="thickness"
+                                   value="{{ material.thickness or '' }}">
+                        </div>
+                    </div>
+
+                    <!-- Tube dimensions -->
+                    <div id="tube-dims" {% if material.form != 'tube' %}style="display:none"{% endif %}>
+                        <div class="mb-3">
+                            <label class="form-label">Outer Width (inches)</label>
+                            <input type="number" step="0.001" class="form-control" name="outer_width"
+                                   value="{{ material.outer_width or '' }}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Outer Height (inches)</label>
+                            <input type="number" step="0.001" class="form-control" name="outer_height"
+                                   value="{{ material.outer_height or '' }}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Wall Thickness (inches)</label>
+                            <input type="number" step="0.001" class="form-control" name="wall_thickness"
+                                   value="{{ material.wall_thickness or '' }}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- G-Code Standards Column -->
+        <div class="col-md-8">
+            <div class="card mb-3">
+                <div class="card-header">G-Code Standards by Tool Size</div>
+                <div class="card-body">
+                    <p class="text-muted">Configure speeds and feeds for each tool size.</p>
+
+                    <!-- Tabs for Drill vs Cut -->
+                    <ul class="nav nav-tabs" role="tablist">
+                        <li class="nav-item">
+                            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#drill-tab">
+                                Drill Operations
+                            </button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#cut-tab">
+                                Cut Operations
+                            </button>
+                        </li>
+                    </ul>
+
+                    <div class="tab-content mt-3">
+                        <!-- Drill Tab -->
+                        <div class="tab-pane fade show active" id="drill-tab">
+                            {% for tool in tools if tool.tool_type == 'drill' %}
+                            {% set tool_key = tool.size | string %}
+                            {% set params = material.gcode_standards.get('drill', {}).get(tool_key, {}) %}
+                            <div class="card mb-2">
+                                <div class="card-header py-2">
+                                    <strong>{{ tool.description }}</strong> ({{ tool.size }}")
+                                </div>
+                                <div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Spindle Speed (RPM)</label>
+                                            <input type="number" class="form-control form-control-sm"
+                                                   name="drill_{{ tool.size }}_spindle_speed"
+                                                   value="{{ params.get('spindle_speed', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Feed Rate (in/min)</label>
+                                            <input type="number" step="0.1" class="form-control form-control-sm"
+                                                   name="drill_{{ tool.size }}_feed_rate"
+                                                   value="{{ params.get('feed_rate', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Plunge Rate (in/min)</label>
+                                            <input type="number" step="0.1" class="form-control form-control-sm"
+                                                   name="drill_{{ tool.size }}_plunge_rate"
+                                                   value="{{ params.get('plunge_rate', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Pecking Depth (in)</label>
+                                            <input type="number" step="0.001" class="form-control form-control-sm"
+                                                   name="drill_{{ tool.size }}_pecking_depth"
+                                                   value="{{ params.get('pecking_depth', '') }}">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+
+                        <!-- Cut Tab -->
+                        <div class="tab-pane fade" id="cut-tab">
+                            {% for tool in tools if tool.tool_type == 'end_mill' %}
+                            {% set tool_key = tool.size | string %}
+                            {% set params = material.gcode_standards.get('cut', {}).get(tool_key, {}) %}
+                            <div class="card mb-2">
+                                <div class="card-header py-2">
+                                    <strong>{{ tool.description }}</strong> ({{ tool.size }}")
+                                </div>
+                                <div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Spindle Speed (RPM)</label>
+                                            <input type="number" class="form-control form-control-sm"
+                                                   name="cut_{{ tool.size }}_spindle_speed"
+                                                   value="{{ params.get('spindle_speed', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Feed Rate (in/min)</label>
+                                            <input type="number" step="0.1" class="form-control form-control-sm"
+                                                   name="cut_{{ tool.size }}_feed_rate"
+                                                   value="{{ params.get('feed_rate', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Plunge Rate (in/min)</label>
+                                            <input type="number" step="0.1" class="form-control form-control-sm"
+                                                   name="cut_{{ tool.size }}_plunge_rate"
+                                                   value="{{ params.get('plunge_rate', '') }}">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small">Pass Depth (in)</label>
+                                            <input type="number" step="0.001" class="form-control form-control-sm"
+                                                   name="cut_{{ tool.size }}_pass_depth"
+                                                   value="{{ params.get('pass_depth', '') }}">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary">Save Changes</button>
+        <a href="{{ url_for('settings.materials') }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+</form>
+
+<script>
+document.getElementById('material-form').addEventListener('change', function() {
+    document.getElementById('sheet-dims').style.display = this.value === 'sheet' ? 'block' : 'none';
+    document.getElementById('tube-dims').style.display = this.value === 'tube' ? 'block' : 'none';
+});
+</script>
+{% endblock %}
+```
+
+---
+
+### Tools Management Page (templates/settings/tools.html)
+
+```html
+{% extends "base.html" %}
+{% block title %}Tools - Settings{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1>Tools</h1>
+    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addToolModal">
+        + Add Tool
+    </button>
+</div>
+
+<div class="row">
+    <!-- Drill Bits -->
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Drill Bits</div>
+            <ul class="list-group list-group-flush">
+                {% for tool in tools if tool.tool_type == 'drill' %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>{{ tool.size }}"</strong>
+                        {% if tool.description %}<span class="text-muted">- {{ tool.description }}</span>{% endif %}
+                    </div>
+                    <form action="{{ url_for('settings.delete_tool', tool_id=tool.id) }}" method="POST" class="d-inline">
+                        <button type="submit" class="btn btn-sm btn-outline-danger"
+                                onclick="return confirm('Delete this tool?')">Delete</button>
+                    </form>
+                </li>
+                {% else %}
+                <li class="list-group-item text-muted">No drill bits defined</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <!-- End Mills -->
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">End Mills</div>
+            <ul class="list-group list-group-flush">
+                {% for tool in tools if tool.tool_type == 'end_mill' %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>{{ tool.size }}"</strong>
+                        {% if tool.description %}<span class="text-muted">- {{ tool.description }}</span>{% endif %}
+                    </div>
+                    <form action="{{ url_for('settings.delete_tool', tool_id=tool.id) }}" method="POST" class="d-inline">
+                        <button type="submit" class="btn btn-sm btn-outline-danger"
+                                onclick="return confirm('Delete this tool?')">Delete</button>
+                    </form>
+                </li>
+                {% else %}
+                <li class="list-group-item text-muted">No end mills defined</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+
+<a href="{{ url_for('settings.index') }}" class="btn btn-outline-secondary">Back to Settings</a>
+
+<!-- Add Tool Modal -->
+<div class="modal fade" id="addToolModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="POST" action="{{ url_for('settings.create_tool') }}">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add Tool</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Tool Type</label>
+                        <select class="form-select" name="tool_type" required>
+                            <option value="drill">Drill Bit</option>
+                            <option value="end_mill">End Mill</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Size (inches)</label>
+                        <input type="number" step="0.001" class="form-control" name="size" required
+                               placeholder="e.g., 0.125">
+                        <div class="form-text">Common sizes: 0.125 (1/8"), 0.1875 (3/16"), 0.25 (1/4")</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Description (optional)</label>
+                        <input type="text" class="form-control" name="description"
+                               placeholder="e.g., 1/8&quot; cobalt drill bit">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Tool</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+```
+
+---
+
+## JavaScript Utility Functions
+
+Add these utility functions to help with common tasks:
+
+### static/js/utils.js
+
+```javascript
+/**
+ * Utility functions for the G-Code Generator
+ */
+
+// Format a number as a fraction string (for display)
+function formatAsFraction(decimal) {
+    const fractions = {
+        0.0625: '1/16',
+        0.125: '1/8',
+        0.1875: '3/16',
+        0.25: '1/4',
+        0.3125: '5/16',
+        0.375: '3/8',
+        0.4375: '7/16',
+        0.5: '1/2'
+    };
+    return fractions[decimal] || decimal.toString();
+}
+
+// Debounce function for input handlers
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Generate a unique ID for operations
+function generateId(prefix = 'op') {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Deep clone an object
+function deepClone(obj) {
+    return JSON.parse(JSON.stringify(obj));
+}
+
+// Show a toast notification (requires Bootstrap)
+function showToast(message, type = 'info') {
+    const toastContainer = document.getElementById('toast-container') ||
+        createToastContainer();
+
+    const toastEl = document.createElement('div');
+    toastEl.className = `toast align-items-center text-white bg-${type} border-0`;
+    toastEl.setAttribute('role', 'alert');
+    toastEl.innerHTML = `
+        <div class="d-flex">
+            <div class="toast-body">${message}</div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto"
+                    data-bs-dismiss="toast"></button>
+        </div>
+    `;
+
+    toastContainer.appendChild(toastEl);
+    const toast = new bootstrap.Toast(toastEl, { delay: 3000 });
+    toast.show();
+
+    toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+}
+
+function createToastContainer() {
+    const container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+    document.body.appendChild(container);
+    return container;
+}
+
+// Validate a coordinate value
+function isValidCoordinate(value, min = 0, max = 15) {
+    const num = parseFloat(value);
+    return !isNaN(num) && num >= min && num <= max;
+}
+
+// Format coordinate for display
+function formatCoordinate(value) {
+    return parseFloat(value).toFixed(3);
+}
+```
+
+---
+
+## Error Handling Patterns
+
+### Displaying Validation Errors in Forms
+
+```javascript
+// In project-editor.js
+
+function showFieldError(fieldId, message) {
+    const field = document.getElementById(fieldId);
+    if (!field) return;
+
+    field.classList.add('is-invalid');
+
+    // Add or update feedback element
+    let feedback = field.nextElementSibling;
+    if (!feedback || !feedback.classList.contains('invalid-feedback')) {
+        feedback = document.createElement('div');
+        feedback.className = 'invalid-feedback';
+        field.parentNode.insertBefore(feedback, field.nextSibling);
+    }
+    feedback.textContent = message;
+}
+
+function clearFieldError(fieldId) {
+    const field = document.getElementById(fieldId);
+    if (!field) return;
+
+    field.classList.remove('is-invalid');
+    const feedback = field.nextElementSibling;
+    if (feedback && feedback.classList.contains('invalid-feedback')) {
+        feedback.remove();
+    }
+}
+
+function clearAllErrors() {
+    document.querySelectorAll('.is-invalid').forEach(el => {
+        el.classList.remove('is-invalid');
+    });
+    document.querySelectorAll('.invalid-feedback').forEach(el => {
+        el.remove();
+    });
+}
+```
+
+### API Error Handling
+
+```javascript
+// Wrapper for fetch with error handling
+async function apiCall(url, options = {}) {
+    try {
+        const response = await fetch(url, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new ApiError(data.error || data.message || 'Request failed', response.status, data);
+        }
+
+        return data;
+    } catch (error) {
+        if (error instanceof ApiError) {
+            throw error;
+        }
+        throw new ApiError('Network error - please check your connection', 0);
+    }
+}
+
+class ApiError extends Error {
+    constructor(message, status, data = null) {
+        super(message);
+        this.status = status;
+        this.data = data;
+    }
+}
+
+// Usage:
+async function saveProject() {
+    try {
+        const result = await apiCall(`/api/projects/${this.projectId}/save`, {
+            method: 'POST',
+            body: JSON.stringify(this.data)
+        });
+        showToast('Project saved!', 'success');
+        return result;
+    } catch (error) {
+        if (error.data && error.data.errors) {
+            error.data.errors.forEach(err => showToast(err, 'danger'));
+        } else {
+            showToast(error.message, 'danger');
+        }
+        return null;
+    }
+}
+```
