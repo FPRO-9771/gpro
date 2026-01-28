@@ -130,6 +130,35 @@ def _format_general_section(lines: list, general: Dict) -> None:
     lines.append(f"Safety Height: {general.get('safety_height', 'N/A')} in")
     lines.append(f"Travel Height: {general.get('travel_height', 'N/A')} in")
     lines.append(f"Spindle Warmup: {general.get('spindle_warmup_seconds', 'N/A')} sec")
+    lines.append(f"Cut-Through Buffer: {general.get('cut_through_buffer', 'N/A')} in")
+    lines.append("")
+
+    # Lead-in settings
+    lines.append("Lead-In Types:")
+    lines.append(f"  Circle: {general.get('circle_lead_in_type', 'N/A')}")
+    lines.append(f"  Hexagon: {general.get('hexagon_lead_in_type', 'N/A')}")
+    lines.append(f"  Line: {general.get('line_lead_in_type', 'N/A')}")
+    lines.append(f"Ramp Angle: {general.get('ramp_angle', 'N/A')}°")
+    lines.append(f"Helix Pitch: {general.get('helix_pitch', 'N/A')} in/rev")
+    lines.append("")
+
+    # Feed adjustments
+    lines.append("Feed Adjustments:")
+    lines.append(f"  First Pass Feed Factor: {general.get('first_pass_feed_factor', 'N/A')}")
+    corner_enabled = general.get('corner_slowdown_enabled', False)
+    lines.append(f"  Corner Slowdown: {'Enabled' if corner_enabled else 'Disabled'}")
+    if corner_enabled:
+        lines.append(f"    Corner Feed Factor: {general.get('corner_feed_factor', 'N/A')}")
+    arc_enabled = general.get('arc_slowdown_enabled', False)
+    lines.append(f"  Arc Slowdown: {'Enabled' if arc_enabled else 'Disabled'}")
+    if arc_enabled:
+        lines.append(f"    Arc Feed Factor: {general.get('arc_feed_factor', 'N/A')}")
+    lines.append("")
+
+    # Validation settings
+    lines.append("Validation:")
+    lines.append(f"  Max Stepdown Factor: {general.get('max_stepdown_factor', 'N/A')} (of tool diameter)")
+    lines.append(f"  Allow Negative Coordinates: {general.get('allow_negative_coordinates', False)}")
     lines.append("")
 
 
