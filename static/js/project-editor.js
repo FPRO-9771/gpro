@@ -186,6 +186,98 @@ class ProjectEditor {
         }
     }
 
+    // --- Title Inline Editing ---
+
+    startEditingTitle() {
+        const titleEl = document.getElementById('projectTitle');
+        const inputEl = document.getElementById('projectTitleInput');
+        const editBtn = document.getElementById('editTitleBtn');
+        const saveBtn = document.getElementById('saveTitleBtn');
+        const cancelBtn = document.getElementById('cancelTitleBtn');
+
+        // Store original value for cancel
+        this.originalTitle = this.data.name;
+
+        // Show input, hide title
+        titleEl.style.display = 'none';
+        inputEl.style.display = 'block';
+        inputEl.value = this.data.name;
+        inputEl.focus();
+        inputEl.select();
+
+        // Toggle buttons
+        editBtn.style.display = 'none';
+        saveBtn.style.display = 'inline-block';
+        cancelBtn.style.display = 'inline-block';
+
+        // Handle Enter key to save
+        inputEl.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                this.saveTitle();
+            } else if (e.key === 'Escape') {
+                this.cancelEditingTitle();
+            }
+        };
+    }
+
+    async saveTitle() {
+        const inputEl = document.getElementById('projectTitleInput');
+        const newName = inputEl.value.trim();
+
+        if (!newName) {
+            API.showError('Project name cannot be empty');
+            return;
+        }
+
+        // Update local data
+        this.data.name = newName;
+
+        // Save to server
+        try {
+            const result = await API.post(`/api/projects/${this.projectId}/save`, { name: newName });
+            if (result.status === 'ok') {
+                // Update the title display
+                document.getElementById('projectTitle').textContent = newName;
+                // Update the input in the Project Info card
+                document.getElementById('projectName').value = newName;
+                // Update page title
+                document.title = `${newName} - GPRO`;
+
+                this.finishEditingTitle();
+                API.showSuccess('Project renamed');
+            }
+        } catch (error) {
+            API.showError('Failed to rename: ' + error.message);
+        }
+    }
+
+    cancelEditingTitle() {
+        // Restore original name
+        this.data.name = this.originalTitle;
+        this.finishEditingTitle();
+    }
+
+    finishEditingTitle() {
+        const titleEl = document.getElementById('projectTitle');
+        const inputEl = document.getElementById('projectTitleInput');
+        const editBtn = document.getElementById('editTitleBtn');
+        const saveBtn = document.getElementById('saveTitleBtn');
+        const cancelBtn = document.getElementById('cancelTitleBtn');
+
+        // Show title, hide input
+        titleEl.style.display = 'block';
+        inputEl.style.display = 'none';
+
+        // Toggle buttons
+        editBtn.style.display = 'inline-block';
+        saveBtn.style.display = 'none';
+        cancelBtn.style.display = 'none';
+
+        // Clear event handler
+        inputEl.onkeydown = null;
+    }
+
     // --- Field Updates ---
 
     updateField(field, value) {

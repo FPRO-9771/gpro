@@ -8,7 +8,19 @@
         <a href="{{ url_for('main.index') }}" class="btn btn-outline-secondary btn-sm mb-2">
             <i class="bi bi-arrow-left"></i> Back to Projects
         </a>
-        <h1 id="projectTitle">{{ project.name }}</h1>
+        <div class="d-flex align-items-center gap-2">
+            <h1 id="projectTitle" class="mb-0">{{ project.name }}</h1>
+            <input type="text" id="projectTitleInput" class="form-control form-control-lg" value="{{ project.name }}" style="display: none; max-width: 400px;">
+            <button type="button" id="editTitleBtn" class="btn btn-outline-secondary btn-sm" onclick="editor.startEditingTitle()" title="Rename project">
+                <i class="bi bi-pencil"></i>
+            </button>
+            <button type="button" id="saveTitleBtn" class="btn btn-primary btn-sm" onclick="editor.saveTitle()" style="display: none;">
+                Save
+            </button>
+            <button type="button" id="cancelTitleBtn" class="btn btn-outline-secondary btn-sm" onclick="editor.cancelEditingTitle()" style="display: none;">
+                Cancel
+            </button>
+        </div>
     </div>
     <div class="btn-group">
         <button type="button" class="btn btn-outline-primary" onclick="editor.refreshPreview()">
