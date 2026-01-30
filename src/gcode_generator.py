@@ -889,6 +889,8 @@ class WebGCodeGenerator:
                 self.used_subroutine_numbers.append(sub_num)
 
                 # Auto mode uses default 90° approach angle
+                # Apply arc slowdown factor if enabled
+                arc_factor = self.settings.arc_feed_factor if self.settings.arc_slowdown_enabled else 1.0
                 sub_content = generate_circle_pass_subroutine(
                     cut_radius, actual_pass_depth, params.plunge_rate, params.feed_rate,
                     lead_in_distance=self.lead_in_distance if effective_lead_in_type == 'ramp' else None,
@@ -896,7 +898,8 @@ class WebGCodeGenerator:
                     helix_radius=helix_radius,
                     helix_pitch=self.settings.helix_pitch,
                     approach_angle=90,
-                    hold_time=hold_time
+                    hold_time=hold_time,
+                    arc_feed_factor=arc_factor
                 )
                 self.subroutines[sub_num] = sub_content
 
@@ -1021,6 +1024,8 @@ class WebGCodeGenerator:
                 sub_num = get_next_subroutine_number('hexagonal', self.used_subroutine_numbers)
                 self.used_subroutine_numbers.append(sub_num)
 
+                # Apply arc slowdown factor if enabled (affects helix arcs only)
+                arc_factor = self.settings.arc_feed_factor if self.settings.arc_slowdown_enabled else 1.0
                 sub_content = generate_hexagon_pass_subroutine(
                     vertices, actual_pass_depth, params.plunge_rate, params.feed_rate,
                     lead_in_point=lead_in_point,
@@ -1029,7 +1034,8 @@ class WebGCodeGenerator:
                     helix_radius=helix_radius,
                     helix_pitch=self.settings.helix_pitch,
                     approach_angle=approach_angle,
-                    hold_time=hold_time
+                    hold_time=hold_time,
+                    arc_feed_factor=arc_factor
                 )
                 self.subroutines[sub_num] = sub_content
 

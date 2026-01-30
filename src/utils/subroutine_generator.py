@@ -169,7 +169,8 @@ def generate_helical_preamble_circle(
     helix_pitch: float,
     plunge_rate: float,
     feed_rate: float,
-    approach_angle: float = 90
+    approach_angle: float = 90,
+    arc_feed_factor: float = 1.0
 ) -> List[str]:
     """
     Generate helical lead-in preamble for circle subroutines.
@@ -179,9 +180,11 @@ def generate_helical_preamble_circle(
     Each subroutine call descends from current Z position.
 
     Feed rate ramping: The feed rate ramps up during the helix in 3 steps
-    (25%, 50%, 75% of the range from plunge_rate to feed_rate). The
-    transition arc completes at 100%. This provides smooth acceleration
-    as the tool establishes itself in the material.
+    (25%, 50%, 75% of the range from plunge_rate to arc_feed). The
+    transition arc completes at 100% of arc_feed.
+
+    Arc slowdown: All arc moves use feed_rate * arc_feed_factor to reduce
+    stress on arcs compared to straight cuts.
 
     Args:
         helix_radius: Radius of the helical descent
@@ -189,14 +192,18 @@ def generate_helical_preamble_circle(
         pass_depth: Depth increment per pass
         helix_pitch: Z drop per revolution
         plunge_rate: Starting feed rate for the helical descent
-        feed_rate: Target feed rate (for transition to profile)
+        feed_rate: Base cutting feed rate
         approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
                        Default 90° matches original 3 o'clock position
+        arc_feed_factor: Multiplier for arc moves (default 1.0, use 0.8 for 80%)
 
     Returns:
         List of preamble G-code commands
     """
     lines = []
+
+    # Apply arc slowdown to target feed rate
+    arc_feed = feed_rate * arc_feed_factor
 
     # Calculate revolutions for this pass depth
     revolutions = calculate_helix_revolutions(pass_depth, helix_pitch)
@@ -212,10 +219,10 @@ def generate_helical_preamble_circle(
     # Switch to relative mode for Z
     lines.append("G91")
 
-    # Helical descent with feed ramping (25%, 50%, 75% steps)
-    # Transition arc (if any) completes at 100%
+    # Helical descent with feed ramping (25%, 50%, 75% steps toward arc_feed)
+    # Transition arc (if any) completes at 100% of arc_feed
     for rev in range(revolutions):
-        current_feed = calculate_ramped_helix_feed(rev, revolutions, plunge_rate, feed_rate)
+        current_feed = calculate_ramped_helix_feed(rev, revolutions, plunge_rate, arc_feed)
         # G02 X0 Y0 means return to same XY (full circle), Z descends relatively
         lines.append(
             f"G02 X0 Y0 Z{format_coordinate(-depth_per_rev)} "
@@ -225,7 +232,7 @@ def generate_helical_preamble_circle(
     # Switch back to absolute mode
     lines.append("G90")
 
-    # If helix radius is different from cut radius, arc to profile
+    # If helix radius is different from cut radius, arc to profile at arc_feed
     if abs(helix_radius - cut_radius) > 0.001:
         # Arc outward from helix to cut profile
         # Current position: on helix at approach angle
@@ -237,7 +244,7 @@ def generate_helical_preamble_circle(
         lines.append("G91")
         lines.append(
             f"G02 X{format_coordinate(delta_x)} Y{format_coordinate(delta_y)} "
-            f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(feed_rate, 1)}"
+            f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(arc_feed, 1)}"
         )
         lines.append("G90")
 
@@ -254,7 +261,8 @@ def generate_helical_preamble_hexagon(
     helix_pitch: float,
     plunge_rate: float,
     feed_rate: float,
-    approach_angle: float = 90
+    approach_angle: float = 90,
+    arc_feed_factor: float = 1.0
 ) -> List[str]:
     """
     Generate helical lead-in preamble for hexagon subroutines.
@@ -264,8 +272,11 @@ def generate_helical_preamble_hexagon(
     from current Z position for multi-pass with L parameter.
 
     Feed rate ramping: The feed rate ramps up during the helix in 3 steps
-    (25%, 50%, 75% of the range from plunge_rate to feed_rate). The
-    transition to the first vertex completes at 100%.
+    (25%, 50%, 75% of the range from plunge_rate to arc_feed). The
+    transition to the first vertex (linear move) uses full feed_rate.
+
+    Arc slowdown: Helix arc moves use feed_rate * arc_feed_factor.
+    The linear transition to vertex uses full feed_rate (not an arc).
 
     Args:
         center_x: Hexagon center X coordinate
@@ -276,14 +287,18 @@ def generate_helical_preamble_hexagon(
         pass_depth: Depth increment per pass
         helix_pitch: Z drop per revolution
         plunge_rate: Starting feed rate for the helical descent
-        feed_rate: Target feed rate (for transition to vertex)
+        feed_rate: Base cutting feed rate
         approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
                        Default 90° matches original 3 o'clock position
+        arc_feed_factor: Multiplier for arc moves (default 1.0, use 0.8 for 80%)
 
     Returns:
         List of preamble G-code commands
     """
     lines = []
+
+    # Apply arc slowdown to helix target feed rate
+    arc_feed = feed_rate * arc_feed_factor
 
     # Calculate revolutions for this pass depth
     revolutions = calculate_helix_revolutions(pass_depth, helix_pitch)
@@ -299,10 +314,10 @@ def generate_helical_preamble_hexagon(
     # Switch to relative mode for Z
     lines.append("G91")
 
-    # Helical descent with feed ramping (25%, 50%, 75% steps)
-    # Transition to vertex completes at 100%
+    # Helical descent with feed ramping (25%, 50%, 75% steps toward arc_feed)
+    # Transition to vertex uses full feed_rate (linear move, not arc)
     for rev in range(revolutions):
-        current_feed = calculate_ramped_helix_feed(rev, revolutions, plunge_rate, feed_rate)
+        current_feed = calculate_ramped_helix_feed(rev, revolutions, plunge_rate, arc_feed)
         lines.append(
             f"G02 X0 Y0 Z{format_coordinate(-depth_per_rev)} "
             f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(current_feed, 1)}"
@@ -311,7 +326,7 @@ def generate_helical_preamble_hexagon(
     # Switch back to absolute mode
     lines.append("G90")
 
-    # Linear move from helix end to first vertex at full feed
+    # Linear move from helix end to first vertex at full feed (not an arc)
     lines.append(
         f"G01 X{format_coordinate(first_vertex_x)} Y{format_coordinate(first_vertex_y)} "
         f"F{format_coordinate(feed_rate, 1)}"
@@ -404,7 +419,8 @@ def generate_circle_pass_subroutine(
     helix_radius: Optional[float] = None,
     helix_pitch: float = 0.04,
     approach_angle: float = 90,
-    hold_time: float = 0
+    hold_time: float = 0,
+    arc_feed_factor: float = 1.0
 ) -> str:
     """
     Generate a single-pass circle cut subroutine.
@@ -412,11 +428,14 @@ def generate_circle_pass_subroutine(
     Cuts one full circle at relative depth. Use L parameter for multi-pass.
     Supports three entry types: vertical plunge, ramped entry, or helical entry.
 
+    Arc slowdown: All arc moves (helix, transition, profile, lead-out) use
+    feed_rate * arc_feed_factor to reduce stress on arcs.
+
     Args:
         cut_radius: Radius of toolpath (feature radius - tool radius)
         pass_depth: Depth increment per pass
         plunge_rate: Plunge feed rate (in/min)
-        feed_rate: Cutting feed rate (in/min)
+        feed_rate: Base cutting feed rate (in/min)
         lead_in_distance: Lead-in distance for ramped entry (used if lead_in_type='ramp')
         lead_in_type: Entry type - 'none', 'ramp', or 'helical'
         helix_radius: Radius for helical entry (used if lead_in_type='helical')
@@ -424,11 +443,15 @@ def generate_circle_pass_subroutine(
         approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
                        Default 90° matches original 3 o'clock position
         hold_time: Dwell time in seconds at start of each pass (0 = no dwell)
+        arc_feed_factor: Multiplier for arc moves (default 1.0, use 0.8 for 80%)
 
     Returns:
         Complete subroutine file content
     """
     lines = []
+
+    # Apply arc slowdown to feed rate for all arc moves
+    arc_feed = feed_rate * arc_feed_factor
 
     # Convert user angle to math angle for I/J calculations
     math_angle = _user_angle_to_math_angle(approach_angle)
@@ -437,7 +460,7 @@ def generate_circle_pass_subroutine(
         # Helical lead-in: spiral down then arc to profile
         lines.extend(generate_helical_preamble_circle(
             helix_radius, cut_radius, pass_depth, helix_pitch, plunge_rate, feed_rate,
-            approach_angle
+            approach_angle, arc_feed_factor
         ))
     elif lead_in_type == 'ramp' and lead_in_distance is not None and lead_in_distance > 0:
         # Ramp lead-in: start at lead-in point, ramp to profile start
@@ -454,7 +477,7 @@ def generate_circle_pass_subroutine(
     # Full circle arc - I/J point from current position (at approach angle) to center
     i_offset = -cut_radius * math.cos(math_angle)
     j_offset = -cut_radius * math.sin(math_angle)
-    lines.append(f"G02 I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(feed_rate, 1)}")
+    lines.append(f"G02 I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(arc_feed, 1)}")
 
     if lead_in_type == 'helical' and helix_radius is not None and helix_radius > 0:
         # Lead-out for helical: arc back to helix start position
@@ -464,7 +487,7 @@ def generate_circle_pass_subroutine(
             lines.append("G91")
             lines.append(
                 f"G02 X{format_coordinate(delta_x)} Y{format_coordinate(delta_y)} "
-                f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(feed_rate, 1)}"
+                f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(arc_feed, 1)}"
             )
             lines.append("G90")
     elif lead_in_type == 'ramp' and lead_in_distance is not None and lead_in_distance > 0:
@@ -494,7 +517,8 @@ def generate_hexagon_pass_subroutine(
     helix_radius: Optional[float] = None,
     helix_pitch: float = 0.04,
     approach_angle: float = 90,
-    hold_time: float = 0
+    hold_time: float = 0,
+    arc_feed_factor: float = 1.0
 ) -> str:
     """
     Generate a single-pass hexagon cut subroutine.
@@ -502,11 +526,14 @@ def generate_hexagon_pass_subroutine(
     Cuts around all 6 vertices at relative depth. Use L parameter for multi-pass.
     Supports three entry types: vertical plunge, ramped entry, or helical entry.
 
+    Arc slowdown: Helix arc moves use feed_rate * arc_feed_factor. The hexagon
+    profile cuts are linear (G01), so arc_feed_factor only affects the helix.
+
     Args:
         vertices: List of 6 (x, y) vertex coordinates (absolute)
         pass_depth: Depth increment per pass
         plunge_rate: Plunge feed rate (in/min)
-        feed_rate: Cutting feed rate (in/min)
+        feed_rate: Base cutting feed rate (in/min)
         lead_in_point: (x, y) lead-in point for ramped entry
         lead_in_type: Entry type - 'none', 'ramp', or 'helical'
         center: (x, y) hexagon center for helical entry
@@ -515,6 +542,7 @@ def generate_hexagon_pass_subroutine(
         approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
                        Default 90° matches original 3 o'clock position
         hold_time: Dwell time in seconds at start of each pass (0 = no dwell)
+        arc_feed_factor: Multiplier for arc moves (default 1.0, use 0.8 for 80%)
 
     Returns:
         Complete subroutine file content
@@ -533,7 +561,7 @@ def generate_hexagon_pass_subroutine(
             center_x, center_y, helix_radius,
             profile_start_x, profile_start_y,
             pass_depth, helix_pitch, plunge_rate, feed_rate,
-            approach_angle
+            approach_angle, arc_feed_factor
         ))
         # Track helix end position for lead-out (at approach angle)
         helix_end_x = center_x + helix_radius * math.cos(math_angle)
