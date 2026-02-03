@@ -885,12 +885,16 @@ class WebGCodeGenerator:
                     lead_in_type, helix_radius, f"Circle d={diameter}\""
                 )
 
+                # Check if first pass feed reduction is enabled
+                use_first_pass_reduction = self.settings.first_pass_feed_factor < 1.0
+
                 sub_num = get_next_subroutine_number('circular', self.used_subroutine_numbers)
                 self.used_subroutine_numbers.append(sub_num)
 
                 # Auto mode uses default 90° approach angle
                 # Apply arc slowdown factor if enabled
                 arc_factor = self.settings.arc_feed_factor if self.settings.arc_slowdown_enabled else 1.0
+                # Subroutine always uses full feed (first pass handled inline if needed)
                 sub_content = generate_circle_pass_subroutine(
                     cut_radius, actual_pass_depth, params.plunge_rate, params.feed_rate,
                     lead_in_distance=self.lead_in_distance if effective_lead_in_type == 'ramp' else None,
@@ -898,7 +902,7 @@ class WebGCodeGenerator:
                     helix_radius=helix_radius,
                     helix_pitch=self.settings.helix_pitch,
                     approach_angle=90,
-                    hold_time=hold_time,
+                    hold_time=hold_time if not use_first_pass_reduction else 0,  # Dwell in inline first pass
                     arc_feed_factor=arc_factor
                 )
                 self.subroutines[sub_num] = sub_content
@@ -928,7 +932,21 @@ class WebGCodeGenerator:
                         lines.append(generate_rapid_move(x=start_x, y=cy, z=self.settings.travel_height))
 
                     lines.append(generate_rapid_move(z=0))
-                    lines.append(generate_subroutine_call(sub_path, num_passes))
+
+                    if use_first_pass_reduction:
+                        # First pass inline at reduced feed, remaining passes via subroutine
+                        lines.extend(self._generate_circle_first_pass_inline(
+                            circle, params, actual_pass_depth, cut_radius,
+                            helix_radius, effective_lead_in_type,
+                            approach_angle=90, hold_time=hold_time
+                        ))
+                        # Call subroutine for remaining passes (if any)
+                        if num_passes > 1:
+                            lines.append(generate_subroutine_call(sub_path, num_passes - 1))
+                    else:
+                        # All passes via subroutine at full feed
+                        lines.append(generate_subroutine_call(sub_path, num_passes))
+
                     lines.append(generate_rapid_move(z=self.settings.safety_height))
         elif auto_circles:
             # Inline generation for auto circles when subroutines not supported
@@ -945,6 +963,149 @@ class WebGCodeGenerator:
         """Generate inline circle cut G-code using unified path cutting."""
         config = self._circle_to_path_config(circle, params)
         return self._generate_path_cut(config, params)
+
+    def _generate_circle_first_pass_inline(
+        self,
+        circle: Dict[str, float],
+        params: ToolParams,
+        pass_depth: float,
+        cut_radius: float,
+        helix_radius: Optional[float],
+        effective_lead_in_type: str,
+        approach_angle: float = 90,
+        hold_time: float = 0
+    ) -> List[str]:
+        """
+        Generate inline G-code for the first pass of a circle cut at reduced feed.
+
+        Used when first_pass_feed_factor < 1.0 with subroutines enabled.
+        Generates the first pass inline so feed reduction can be applied,
+        while remaining passes use the subroutine at full feed.
+
+        Args:
+            circle: Circle dict with center_x, center_y, diameter, etc.
+            params: Tool parameters including feed rates
+            pass_depth: Depth for this pass
+            cut_radius: Radius of toolpath (feature radius - tool radius)
+            helix_radius: Radius for helical entry (None if not using helical)
+            effective_lead_in_type: 'none', 'ramp', or 'helical'
+            approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
+            hold_time: Dwell time in seconds at start (0 = no dwell)
+
+        Returns:
+            List of G-code lines for the first pass (no retract at end)
+        """
+        from .utils.lead_in import _user_angle_to_math_angle, calculate_helix_revolutions
+        from .utils.gcode_format import calculate_ramped_helix_feed
+
+        lines = []
+        cx, cy = circle['center_x'], circle['center_y']
+
+        # Apply first pass feed reduction with arc slowdown
+        first_pass_arc_feed = self._get_adjusted_feed(params.feed_rate, pass_num=0, is_arc=True)
+
+        # Convert user angle to math angle for I/J calculations
+        math_angle = _user_angle_to_math_angle(approach_angle)
+
+        # Add dwell if specified (before plunge)
+        if hold_time > 0:
+            hold_time_ms = int(hold_time * 1000)
+            lines.append(f"G04 P{hold_time_ms}")
+
+        # Entry based on lead-in type
+        if effective_lead_in_type == 'helical' and helix_radius is not None and helix_radius > 0:
+            # Helical lead-in: spiral down then arc to profile
+            # Calculate revolutions for this pass depth
+            revolutions = calculate_helix_revolutions(pass_depth, self.settings.helix_pitch)
+            depth_per_rev = pass_depth / revolutions
+
+            # I/J offset from helix start to center
+            i_offset = -helix_radius * math.cos(math_angle)
+            j_offset = -helix_radius * math.sin(math_angle)
+
+            # Switch to relative mode for Z
+            lines.append("G91")
+
+            # Helical descent with feed ramping to first_pass_arc_feed (not full arc_feed)
+            for rev in range(revolutions):
+                current_feed = calculate_ramped_helix_feed(
+                    rev, revolutions, params.plunge_rate, first_pass_arc_feed
+                )
+                lines.append(
+                    f"G02 X0 Y0 Z{format_coordinate(-depth_per_rev)} "
+                    f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(current_feed, 1)}"
+                )
+
+            # Switch back to absolute mode
+            lines.append("G90")
+
+            # Arc to cut profile if helix radius differs from cut radius
+            if abs(helix_radius - cut_radius) > 0.001:
+                delta_x = (cut_radius - helix_radius) * math.cos(math_angle)
+                delta_y = (cut_radius - helix_radius) * math.sin(math_angle)
+                lines.append("G91")
+                lines.append(
+                    f"G02 X{format_coordinate(delta_x)} Y{format_coordinate(delta_y)} "
+                    f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(first_pass_arc_feed, 1)}"
+                )
+                lines.append("G90")
+
+        elif effective_lead_in_type == 'ramp' and self.lead_in_distance > 0:
+            # Ramp lead-in: start at lead-in point, ramp to profile start
+            # Calculate movement from lead-in to profile (opposite of approach direction)
+            dx = -self.lead_in_distance * math.cos(math_angle)
+            dy = -self.lead_in_distance * math.sin(math_angle)
+
+            lines.append("G91")
+            if abs(dy) < 0.0001:
+                lines.append(
+                    f"G01 X{format_coordinate(dx)} Z{format_coordinate(-pass_depth)} "
+                    f"F{format_coordinate(params.plunge_rate, 1)}"
+                )
+            else:
+                lines.append(
+                    f"G01 X{format_coordinate(dx)} Y{format_coordinate(dy)} Z{format_coordinate(-pass_depth)} "
+                    f"F{format_coordinate(params.plunge_rate, 1)}"
+                )
+            lines.append("G90")
+        else:
+            # Vertical plunge
+            lines.append("G91")
+            lines.append(f"G01 Z{format_coordinate(-pass_depth)} F{format_coordinate(params.plunge_rate, 1)}")
+            lines.append("G90")
+
+        # Full circle arc at first-pass-reduced arc feed
+        i_offset = -cut_radius * math.cos(math_angle)
+        j_offset = -cut_radius * math.sin(math_angle)
+        lines.append(f"G02 I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(first_pass_arc_feed, 1)}")
+
+        # Lead-out based on entry type (stay at depth for subroutine to continue)
+        if effective_lead_in_type == 'helical' and helix_radius is not None and helix_radius > 0:
+            # Arc back to helix start position
+            if abs(helix_radius - cut_radius) > 0.001:
+                delta_x = (helix_radius - cut_radius) * math.cos(math_angle)
+                delta_y = (helix_radius - cut_radius) * math.sin(math_angle)
+                lines.append("G91")
+                lines.append(
+                    f"G02 X{format_coordinate(delta_x)} Y{format_coordinate(delta_y)} "
+                    f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(first_pass_arc_feed, 1)}"
+                )
+                lines.append("G90")
+        elif effective_lead_in_type == 'ramp' and self.lead_in_distance > 0:
+            # Return to lead-in point at cutting depth
+            delta_x = self.lead_in_distance * math.cos(math_angle)
+            delta_y = self.lead_in_distance * math.sin(math_angle)
+            lines.append("G91")
+            # Use base feed rate for lead-out (linear move, not arc)
+            first_pass_linear_feed = self._get_adjusted_feed(params.feed_rate, pass_num=0, is_arc=False)
+            if abs(delta_y) < 0.0001:
+                lines.append(f"G01 X{format_coordinate(delta_x)} F{format_coordinate(first_pass_linear_feed, 1)}")
+            else:
+                lines.append(f"G01 X{format_coordinate(delta_x)} Y{format_coordinate(delta_y)} F{format_coordinate(first_pass_linear_feed, 1)}")
+            lines.append("G90")
+
+        # Note: No retract - stay at depth for subroutine to continue
+        return lines
 
     def generate_hexagonal_gcode(
         self,
@@ -1021,11 +1182,15 @@ class WebGCodeGenerator:
                         center=(cx, cy), approach_angle=approach_angle if lead_in_mode == 'manual' else None
                     )
 
+                # Check if first pass feed reduction is enabled
+                use_first_pass_reduction = self.settings.first_pass_feed_factor < 1.0
+
                 sub_num = get_next_subroutine_number('hexagonal', self.used_subroutine_numbers)
                 self.used_subroutine_numbers.append(sub_num)
 
                 # Apply arc slowdown factor if enabled (affects helix arcs only)
                 arc_factor = self.settings.arc_feed_factor if self.settings.arc_slowdown_enabled else 1.0
+                # Subroutine always uses full feed (first pass handled inline if needed)
                 sub_content = generate_hexagon_pass_subroutine(
                     vertices, actual_pass_depth, params.plunge_rate, params.feed_rate,
                     lead_in_point=lead_in_point,
@@ -1034,7 +1199,7 @@ class WebGCodeGenerator:
                     helix_radius=helix_radius,
                     helix_pitch=self.settings.helix_pitch,
                     approach_angle=approach_angle,
-                    hold_time=hold_time,
+                    hold_time=hold_time if not use_first_pass_reduction else 0,  # Dwell in inline first pass
                     arc_feed_factor=arc_factor
                 )
                 self.subroutines[sub_num] = sub_content
@@ -1056,7 +1221,21 @@ class WebGCodeGenerator:
                     lines.append(generate_rapid_move(x=start_x, y=start_y, z=self.settings.travel_height))
 
                 lines.append(generate_rapid_move(z=0))
-                lines.append(generate_subroutine_call(sub_path, num_passes))
+
+                if use_first_pass_reduction:
+                    # First pass inline at reduced feed, remaining passes via subroutine
+                    lines.extend(self._generate_hexagon_first_pass_inline(
+                        hexagon, vertices, params, actual_pass_depth,
+                        helix_radius, effective_lead_in_type, lead_in_point,
+                        approach_angle=approach_angle, hold_time=hold_time
+                    ))
+                    # Call subroutine for remaining passes (if any)
+                    if num_passes > 1:
+                        lines.append(generate_subroutine_call(sub_path, num_passes - 1))
+                else:
+                    # All passes via subroutine at full feed
+                    lines.append(generate_subroutine_call(sub_path, num_passes))
+
                 lines.append(generate_rapid_move(z=self.settings.safety_height))
         else:
             # Inline generation
@@ -1073,6 +1252,136 @@ class WebGCodeGenerator:
         """Generate inline hexagon cut G-code using unified path cutting."""
         config = self._hexagon_to_path_config(hexagon, params)
         return self._generate_path_cut(config, params)
+
+    def _generate_hexagon_first_pass_inline(
+        self,
+        hexagon: Dict[str, float],
+        vertices: List[Tuple[float, float]],
+        params: ToolParams,
+        pass_depth: float,
+        helix_radius: Optional[float],
+        effective_lead_in_type: str,
+        lead_in_point: Optional[Tuple[float, float]],
+        approach_angle: float = 90,
+        hold_time: float = 0
+    ) -> List[str]:
+        """
+        Generate inline G-code for the first pass of a hexagon cut at reduced feed.
+
+        Used when first_pass_feed_factor < 1.0 with subroutines enabled.
+        Generates the first pass inline so feed reduction can be applied,
+        while remaining passes use the subroutine at full feed.
+
+        Args:
+            hexagon: Hexagon dict with center_x, center_y, flat_to_flat, etc.
+            vertices: List of 6 (x, y) vertex coordinates (absolute)
+            params: Tool parameters including feed rates
+            pass_depth: Depth for this pass
+            helix_radius: Radius for helical entry (None if not using helical)
+            effective_lead_in_type: 'none', 'ramp', or 'helical'
+            lead_in_point: (x, y) lead-in point for ramp entry
+            approach_angle: Direction tool approaches from in degrees (0=top, 90=right)
+            hold_time: Dwell time in seconds at start (0 = no dwell)
+
+        Returns:
+            List of G-code lines for the first pass (no retract at end)
+        """
+        from .utils.lead_in import _user_angle_to_math_angle, calculate_helix_revolutions
+        from .utils.gcode_format import calculate_ramped_helix_feed
+
+        lines = []
+        cx, cy = hexagon['center_x'], hexagon['center_y']
+        profile_start_x, profile_start_y = vertices[0]
+
+        # Apply first pass feed reduction (hexagon profile is linear, not arc)
+        first_pass_feed = self._get_adjusted_feed(params.feed_rate, pass_num=0, is_arc=False)
+        # For helical lead-in arcs, use arc slowdown
+        first_pass_arc_feed = self._get_adjusted_feed(params.feed_rate, pass_num=0, is_arc=True)
+
+        # Convert user angle to math angle for helix position calculations
+        math_angle = _user_angle_to_math_angle(approach_angle)
+
+        # Add dwell if specified (before plunge)
+        if hold_time > 0:
+            hold_time_ms = int(hold_time * 1000)
+            lines.append(f"G04 P{hold_time_ms}")
+
+        # Entry based on lead-in type
+        if effective_lead_in_type == 'helical' and helix_radius is not None and helix_radius > 0:
+            # Helical lead-in: spiral down at center, then linear to first vertex
+            # Calculate revolutions for this pass depth
+            revolutions = calculate_helix_revolutions(pass_depth, self.settings.helix_pitch)
+            depth_per_rev = pass_depth / revolutions
+
+            # I/J offset from helix start to center
+            i_offset = -helix_radius * math.cos(math_angle)
+            j_offset = -helix_radius * math.sin(math_angle)
+
+            # Switch to relative mode for Z
+            lines.append("G91")
+
+            # Helical descent with feed ramping to first_pass_arc_feed
+            for rev in range(revolutions):
+                current_feed = calculate_ramped_helix_feed(
+                    rev, revolutions, params.plunge_rate, first_pass_arc_feed
+                )
+                lines.append(
+                    f"G02 X0 Y0 Z{format_coordinate(-depth_per_rev)} "
+                    f"I{format_coordinate(i_offset)} J{format_coordinate(j_offset)} F{format_coordinate(current_feed, 1)}"
+                )
+
+            # Switch back to absolute mode
+            lines.append("G90")
+
+            # Linear move from helix end to first vertex at first pass feed
+            lines.append(
+                f"G01 X{format_coordinate(profile_start_x)} Y{format_coordinate(profile_start_y)} "
+                f"F{format_coordinate(first_pass_feed, 1)}"
+            )
+            # Track helix end position for lead-out
+            helix_end_x = cx + helix_radius * math.cos(math_angle)
+            helix_end_y = cy + helix_radius * math.sin(math_angle)
+
+        elif effective_lead_in_type == 'ramp' and lead_in_point is not None:
+            # Ramp lead-in: ramp from lead-in point to profile start
+            lead_in_x, lead_in_y = lead_in_point
+            dx = profile_start_x - lead_in_x
+            dy = profile_start_y - lead_in_y
+
+            lines.append("G91")
+            lines.append(
+                f"G01 X{format_coordinate(dx)} Y{format_coordinate(dy)} Z{format_coordinate(-pass_depth)} "
+                f"F{format_coordinate(params.plunge_rate, 1)}"
+            )
+            lines.append("G90")
+            helix_end_x, helix_end_y = None, None
+        else:
+            # Vertical plunge
+            lines.append("G91")
+            lines.append(f"G01 Z{format_coordinate(-pass_depth)} F{format_coordinate(params.plunge_rate, 1)}")
+            lines.append("G90")
+            helix_end_x, helix_end_y = None, None
+
+        # Cut to each vertex at first-pass-reduced feed (starting from second)
+        for i in range(1, len(vertices)):
+            x, y = vertices[i]
+            lines.append(f"G01 X{format_coordinate(x)} Y{format_coordinate(y)} F{format_coordinate(first_pass_feed, 1)}")
+
+        # Close back to first vertex
+        x, y = vertices[0]
+        lines.append(f"G01 X{format_coordinate(x)} Y{format_coordinate(y)}")
+
+        # Lead-out based on entry type (stay at depth for subroutine to continue)
+        if effective_lead_in_type == 'helical' and helix_end_x is not None:
+            # Return to helix start position for next pass
+            lines.append(f"G01 X{format_coordinate(helix_end_x)} Y{format_coordinate(helix_end_y)}")
+        elif effective_lead_in_type == 'ramp' and lead_in_point is not None:
+            # Return to lead-in point at cutting depth
+            lead_in_x, lead_in_y = lead_in_point
+            lines.append(f"G01 X{format_coordinate(lead_in_x)} Y{format_coordinate(lead_in_y)}")
+
+        # Note: No retract - stay at depth for subroutine to continue
+        return lines
 
     def _generate_line_first_pass_inline(
         self,
